@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rustube Queue Downloader</title>
+    <style>
+      :root {
+        --bg: #070b14;
+        --panel: #111826;
+        --ink: #e7edf7;
+        --muted: #9aa6bc;
+        --line: #263246;
+        --brand: #00a0b9;
+        --brand-soft: #153446;
+        --ok: #34d399;
+        --bad: #f87171;
+        --shadow: 0 16px 34px rgba(0, 0, 0, 0.45);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Outfit", "Avenir Next", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(1200px 500px at 10% -10%, #10203a 0%, transparent 60%),
+          radial-gradient(900px 380px at 100% 0%, #072f30 0%, transparent 55%),
+          var(--bg);
+        padding: 26px;
+      }
+
+      .shell {
+        width: min(1060px, 100%);
+        margin: 0 auto;
+      }
+
+      .hero {
+        margin-bottom: 16px;
+      }
+
+      .hero h1 {
+        margin: 0;
+        font-size: clamp(1.8rem, 3vw, 2.4rem);
+        letter-spacing: -0.02em;
+      }
+
+      .hero p {
+        margin: 6px 0 0;
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1.2fr 1fr;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+        padding: 18px;
+      }
+
+      .panel h2 {
+        margin: 0 0 10px;
+        font-size: 1.1rem;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .field label {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin-bottom: 10px;
+      }
+
+      input[type="url"],
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 11px 12px;
+        font-size: 0.95rem;
+        background: #0d1524;
+        color: var(--ink);
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 0;
+        border-radius: 12px;
+        padding: 11px 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: var(--brand);
+        color: #fff;
+      }
+
+      .secondary {
+        background: #1a2436;
+        color: #d6deec;
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .status {
+        margin-top: 10px;
+        min-height: 22px;
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+
+      .status.error {
+        color: var(--bad);
+      }
+
+      .video-meta {
+        margin-top: 8px;
+        padding: 10px;
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .queue-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .pill {
+        background: var(--brand-soft);
+        color: var(--brand);
+        border-radius: 999px;
+        padding: 4px 10px;
+        font-size: 0.8rem;
+        font-weight: 600;
+      }
+
+      .queue {
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 70vh;
+        overflow: auto;
+        padding-right: 2px;
+      }
+
+      .queue-item {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px;
+      }
+
+      .queue-title {
+        margin: 0;
+        font-size: 0.95rem;
+      }
+
+      .queue-sub {
+        margin: 4px 0 10px;
+        color: var(--muted);
+        font-size: 0.86rem;
+        word-break: break-word;
+      }
+
+      .queue-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .badge {
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      .badge.queued,
+      .badge.running {
+        color: #155eef;
+      }
+
+      .badge.completed {
+        color: var(--ok);
+      }
+
+      .badge.failed {
+        color: var(--bad);
+      }
+
+      .progress {
+        margin-top: 8px;
+        height: 9px;
+        border-radius: 999px;
+        background: #253249;
+        overflow: hidden;
+      }
+
+      .bar {
+        height: 100%;
+        width: 0;
+        background: linear-gradient(90deg, #22d3ee, #14b8a6);
+        transition: width 180ms ease;
+      }
+
+      .queue-foot {
+        margin-top: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.84rem;
+        color: var(--muted);
+      }
+
+      .queue-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .queue-foot a {
+        color: var(--brand);
+        text-decoration: none;
+        font-weight: 600;
+      }
+
+      .muted {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 980px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <h1>Ash Downloader</h1>
+        <p>Load formats, queue multiple videos, and track live progress from any site.</p>
+      </header>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Add Video</h2>
+
+          <div class="field">
+            <label for="video-url">Video URL</label>
+            <input id="video-url" type="url" placeholder="https://example.com/video-page" />
+          </div>
+
+          <div class="actions">
+            <button id="load-options" class="primary">Load Options</button>
+          </div>
+
+          <div id="picker" hidden>
+            <div class="field" style="margin-top: 12px; margin-bottom: 10px">
+              <label for="format-select">Choose format</label>
+              <select id="format-select"></select>
+            </div>
+            <label class="toggle" for="show-split-formats">
+              <input id="show-split-formats" type="checkbox" />
+              Show audio-only / video-only formats
+            </label>
+            <div class="actions">
+              <button id="add-queue" class="secondary">Add To Queue</button>
+            </div>
+          </div>
+
+          <div id="video-meta" class="video-meta" hidden></div>
+          <div id="status" class="status"></div>
+        </article>
+
+        <article class="panel">
+          <div class="queue-head">
+            <h2 style="margin: 0">Download Queue</h2>
+            <span id="queue-pill" class="pill">0 items</span>
+          </div>
+
+          <div style="margin-top: 10px" class="actions">
+            <button id="start-all" class="primary" disabled>Start All Downloads</button>
+            <button id="clear-done" class="secondary" disabled>Clear Completed</button>
+          </div>
+
+          <div id="queue" class="queue"></div>
+          <p id="queue-empty" class="muted" style="margin-top: 12px">Queue is empty.</p>
+        </article>
+      </section>
+    </div>
+
+    <script>
+      const urlInput = document.getElementById("video-url");
+      const loadOptionsBtn = document.getElementById("load-options");
+      const picker = document.getElementById("picker");
+      const formatSelect = document.getElementById("format-select");
+      const showSplitFormats = document.getElementById("show-split-formats");
+      const addQueueBtn = document.getElementById("add-queue");
+      const statusEl = document.getElementById("status");
+      const videoMeta = document.getElementById("video-meta");
+
+      const queueEl = document.getElementById("queue");
+      const queueEmptyEl = document.getElementById("queue-empty");
+      const queuePill = document.getElementById("queue-pill");
+      const startAllBtn = document.getElementById("start-all");
+      const clearDoneBtn = document.getElementById("clear-done");
+
+      let loaded = null;
+      let visibleOptions = [];
+      let queue = [];
+      let pollTimer = null;
+
+      const terminalStates = new Set(["completed", "failed"]);
+      const QUEUE_STORAGE_KEY = "rustube_queue_v2";
+
+      function makeLocalId() {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          return window.crypto.randomUUID();
+        }
+
+        return `q_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      }
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.className = isError ? "status error" : "status";
+      }
+
+      async function removeJobsOnServer(ids) {
+        const cleanIds = (ids || []).filter(Boolean);
+        if (!cleanIds.length) return;
+
+        try {
+          await fetch("/api/downloads/remove", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: cleanIds }),
+          });
+        } catch (_err) {
+          // Best effort cleanup.
+        }
+      }
+
+      function persistQueue() {
+        try {
+          localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(queue));
+        } catch (_err) {
+          // Ignore storage errors (privacy mode, quota, etc.)
+        }
+      }
+
+      function restoreQueueFromStorage() {
+        try {
+          const raw = localStorage.getItem(QUEUE_STORAGE_KEY);
+          if (!raw) return;
+
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) return;
+
+          queue = parsed
+            .filter((item) => item && typeof item === "object")
+            .map((item) => ({
+              localId: item.localId || makeLocalId(),
+              url: item.url || "",
+              title: item.title || "Untitled video",
+              format_id: item.format_id || "",
+              label: item.label || item.format_id || "Unknown format",
+              status: item.status || "queued",
+              progress: Number(item.progress || 0),
+              file_name: item.file_name || null,
+              error: item.error || null,
+              jobId: item.jobId || null,
+            }));
+        } catch (_err) {
+          queue = [];
+        }
+      }
+
+      function updateQueueButtons() {
+        const pending = queue.some((item) => !item.jobId);
+        const hasCompleted = queue.some((item) => item.status === "completed");
+        startAllBtn.disabled = !pending;
+        clearDoneBtn.disabled = !hasCompleted;
+      }
+
+      function renderQueue() {
+        queueEl.innerHTML = "";
+        queuePill.textContent = `${queue.length} item${queue.length === 1 ? "" : "s"}`;
+
+        if (queue.length === 0) {
+          queueEmptyEl.hidden = false;
+        } else {
+          queueEmptyEl.hidden = true;
+        }
+
+        queue.forEach((item) => {
+          const card = document.createElement("div");
+          card.className = "queue-item";
+
+          const title = document.createElement("h3");
+          title.className = "queue-title";
+          title.textContent = item.title || "Untitled video";
+
+          const sub = document.createElement("p");
+          sub.className = "queue-sub";
+          sub.textContent = `${item.url} | ${item.label}`;
+
+          const meta = document.createElement("div");
+          meta.className = "queue-meta";
+
+          const badge = document.createElement("span");
+          badge.className = `badge ${item.status}`;
+          badge.textContent = item.status;
+
+          const percent = document.createElement("span");
+          percent.className = "muted";
+          percent.textContent = `${Math.floor(item.progress || 0)}%`;
+
+          meta.appendChild(badge);
+          meta.appendChild(percent);
+
+          const progress = document.createElement("div");
+          progress.className = "progress";
+          const bar = document.createElement("div");
+          bar.className = "bar";
+          bar.style.width = `${Math.max(0, Math.min(100, item.progress || 0))}%`;
+          progress.appendChild(bar);
+
+          const foot = document.createElement("div");
+          foot.className = "queue-foot";
+
+          const left = document.createElement("span");
+          left.textContent = item.error || (item.jobId ? `Job: ${item.jobId}` : "Waiting in queue");
+
+          const right = document.createElement("div");
+          right.className = "queue-actions";
+          if (item.status === "completed" && item.file_name) {
+            const link = document.createElement("a");
+            link.href = `/downloads/${encodeURIComponent(item.file_name)}`;
+            link.textContent = "Download file";
+            link.setAttribute("download", item.file_name);
+            right.appendChild(link);
+
+            const removeBtn = document.createElement("button");
+            removeBtn.className = "secondary";
+            removeBtn.style.padding = "6px 10px";
+            removeBtn.style.borderRadius = "9px";
+            removeBtn.textContent = "Remove";
+            removeBtn.addEventListener("click", () => {
+              removeQueueItem(item);
+            });
+            right.appendChild(removeBtn);
+          } else if (item.status === "failed") {
+            const retryBtn = document.createElement("button");
+            retryBtn.className = "primary";
+            retryBtn.style.padding = "6px 10px";
+            retryBtn.style.borderRadius = "9px";
+            retryBtn.textContent = "Retry";
+            retryBtn.addEventListener("click", () => {
+              retryQueueItem(item);
+            });
+            right.appendChild(retryBtn);
+
+            const removeBtn = document.createElement("button");
+            removeBtn.className = "secondary";
+            removeBtn.style.padding = "6px 10px";
+            removeBtn.style.borderRadius = "9px";
+            removeBtn.textContent = "Remove";
+            removeBtn.addEventListener("click", () => {
+              removeQueueItem(item);
+            });
+            right.appendChild(removeBtn);
+          } else if (!item.jobId) {
+            const removeBtn = document.createElement("button");
+            removeBtn.className = "secondary";
+            removeBtn.style.padding = "6px 10px";
+            removeBtn.style.borderRadius = "9px";
+            removeBtn.textContent = "Remove";
+            removeBtn.addEventListener("click", () => {
+              removeQueueItem(item);
+            });
+            right.appendChild(removeBtn);
+          }
+
+          foot.appendChild(left);
+          foot.appendChild(right);
+
+          card.appendChild(title);
+          card.appendChild(sub);
+          card.appendChild(meta);
+          card.appendChild(progress);
+          card.appendChild(foot);
+
+          queueEl.appendChild(card);
+        });
+
+        updateQueueButtons();
+        persistQueue();
+      }
+
+      function filterOptions(options) {
+        const splitOnly = showSplitFormats.checked;
+        if (splitOnly) {
+          return options.filter((opt) => opt.media_kind === "audio_only" || opt.media_kind === "video_only");
+        }
+        return options.filter((opt) => opt.media_kind === "audio_video");
+      }
+
+      function renderFormatOptions() {
+        if (!loaded) {
+          visibleOptions = [];
+          formatSelect.innerHTML = "";
+          return;
+        }
+
+        visibleOptions = filterOptions(loaded.options || []);
+        formatSelect.innerHTML = "";
+
+        visibleOptions.forEach((opt, idx) => {
+          const option = document.createElement("option");
+          option.value = String(idx);
+          option.textContent = `${opt.resolution} | ${opt.ext.toUpperCase()} | ${opt.size_label} | ${opt.note}`;
+          formatSelect.appendChild(option);
+        });
+
+        const modeLabel = showSplitFormats.checked
+          ? "audio-only/video-only"
+          : "audio+video";
+
+        if (!visibleOptions.length) {
+          setStatus(`No ${modeLabel} formats available for this URL.`, true);
+        } else {
+          setStatus(`Loaded ${visibleOptions.length} ${modeLabel} format option(s).`);
+        }
+      }
+
+      async function loadOptions() {
+        const url = urlInput.value.trim();
+        if (!url) {
+          setStatus("Please paste a video URL first.", true);
+          return;
+        }
+
+        loadOptionsBtn.disabled = true;
+        setStatus("Loading video formats...");
+        picker.hidden = true;
+        videoMeta.hidden = true;
+        loaded = null;
+
+        try {
+          const res = await fetch("/api/options", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+          });
+          const data = await res.json().catch(() => null);
+
+          if (!res.ok) {
+            throw new Error(data?.error || "Could not load download options.");
+          }
+
+          loaded = { url, title: data.title, extractor: data.extractor, options: data.options };
+
+          picker.hidden = data.options.length === 0;
+          videoMeta.hidden = false;
+          videoMeta.textContent = `${data.title} (${data.extractor})`;
+          renderFormatOptions();
+        } catch (error) {
+          setStatus(error.message || "Failed to load options.", true);
+        } finally {
+          loadOptionsBtn.disabled = false;
+        }
+      }
+
+      function addToQueue() {
+        try {
+          if (!loaded || !visibleOptions.length) {
+            setStatus("Load options first.", true);
+            return;
+          }
+
+          const index = Number(formatSelect.value || "0");
+          const chosen = visibleOptions[index];
+          if (!chosen) {
+            setStatus("Choose a valid format.", true);
+            return;
+          }
+
+          queue.push({
+            localId: makeLocalId(),
+            url: loaded.url,
+            title: loaded.title,
+            format_id: chosen.format_id,
+            label: `${chosen.resolution}, ${chosen.ext.toUpperCase()}, ${chosen.size_label}`,
+            status: "queued",
+            progress: 0,
+            file_name: null,
+            error: null,
+            jobId: null,
+          });
+
+          renderQueue();
+          setStatus("Added to queue.");
+        } catch (error) {
+          setStatus(error?.message || "Could not add this item to queue.", true);
+        }
+      }
+
+      async function startQueueItems(items, messageLabel = "downloads") {
+        if (!items.length) return;
+
+        const res = await fetch("/api/downloads/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: items.map((item) => ({ url: item.url, format_id: item.format_id })),
+          }),
+        });
+        const data = await res.json().catch(() => null);
+
+        if (!res.ok) {
+          throw new Error(data?.error || `Failed to start ${messageLabel}.`);
+        }
+
+        items.forEach((item, idx) => {
+          const job = data.jobs[idx];
+          if (!job) return;
+          item.jobId = job.id;
+          item.status = job.status;
+          item.progress = job.progress;
+          item.error = job.error;
+          item.file_name = job.file_name;
+        });
+
+        renderQueue();
+        ensurePolling();
+      }
+
+      async function retryQueueItem(item) {
+        try {
+          const oldJobId = item.jobId;
+          if (oldJobId) {
+            await removeJobsOnServer([oldJobId]);
+          }
+
+          item.jobId = null;
+          item.status = "queued";
+          item.progress = 0;
+          item.error = null;
+          item.file_name = null;
+          renderQueue();
+
+          await startQueueItems([item], "retry");
+          setStatus("Retry started.");
+        } catch (error) {
+          setStatus(error.message || "Retry failed to start.", true);
+        }
+      }
+
+      async function removeQueueItem(item) {
+        if (item.jobId) {
+          await removeJobsOnServer([item.jobId]);
+        }
+        queue = queue.filter((q) => q.localId !== item.localId);
+        renderQueue();
+      }
+
+      async function startAllDownloads() {
+        const pending = queue.filter((item) => !item.jobId);
+        if (!pending.length) {
+          return;
+        }
+
+        startAllBtn.disabled = true;
+        setStatus(`Starting ${pending.length} download${pending.length === 1 ? "" : "s"}...`);
+
+        try {
+          await startQueueItems(pending);
+          setStatus("Downloads started. Progress updates are live.");
+        } catch (error) {
+          setStatus(error.message || "Could not start downloads.", true);
+        } finally {
+          updateQueueButtons();
+        }
+      }
+
+      async function pollStatuses() {
+        const active = queue.filter((item) => item.jobId && !terminalStates.has(item.status));
+
+        if (!active.length) {
+          stopPolling();
+          renderQueue();
+          return;
+        }
+
+        try {
+          const res = await fetch("/api/downloads/status", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: active.map((item) => item.jobId) }),
+          });
+
+          if (!res.ok) {
+            return;
+          }
+
+          const data = await res.json().catch(() => null);
+          if (!data?.jobs) return;
+
+          const map = new Map(data.jobs.map((job) => [job.id, job]));
+          queue.forEach((item) => {
+            if (!item.jobId) return;
+            const latest = map.get(item.jobId);
+            if (!latest) return;
+
+            item.status = latest.status;
+            item.progress = latest.progress || 0;
+            item.error = latest.error;
+            item.file_name = latest.file_name;
+          });
+
+          renderQueue();
+        } catch (_err) {
+          // Keep polling even if one request fails.
+        }
+      }
+
+      function ensurePolling() {
+        if (pollTimer) return;
+        pollTimer = setInterval(pollStatuses, 1200);
+      }
+
+      function stopPolling() {
+        if (!pollTimer) return;
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+
+      async function clearCompleted() {
+        clearDoneBtn.disabled = true;
+        try {
+          const res = await fetch("/api/downloads/clear-completed", { method: "POST" });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            throw new Error(data?.error || "Could not clear completed downloads.");
+          }
+
+          queue = queue.filter((item) => item.status !== "completed");
+          renderQueue();
+          setStatus(
+            `Cleared completed downloads (${data?.removed_jobs ?? 0} jobs, ${data?.deleted_files ?? 0} files deleted).`
+          );
+        } catch (error) {
+          setStatus(error.message || "Could not clear completed downloads.", true);
+        } finally {
+          updateQueueButtons();
+        }
+      }
+
+      async function syncQueueFromServer() {
+        const ids = queue.map((item) => item.jobId).filter(Boolean);
+        if (!ids.length) return;
+
+        try {
+          const res = await fetch("/api/downloads/status", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+          });
+          if (!res.ok) return;
+
+          const data = await res.json().catch(() => null);
+          if (!data?.jobs) return;
+
+          const map = new Map(data.jobs.map((job) => [job.id, job]));
+          queue.forEach((item) => {
+            if (!item.jobId) return;
+            const latest = map.get(item.jobId);
+            if (!latest) return;
+
+            item.status = latest.status;
+            item.progress = latest.progress || 0;
+            item.error = latest.error;
+            item.file_name = latest.file_name;
+          });
+          renderQueue();
+        } catch (_err) {
+          // Keep local state if sync fails.
+        }
+      }
+
+      async function hydrateFromServerIfNeeded() {
+        if (queue.length) return;
+
+        try {
+          const res = await fetch("/api/downloads/all");
+          if (!res.ok) return;
+
+          const data = await res.json().catch(() => null);
+          if (!data?.jobs?.length) return;
+
+          queue = data.jobs.map((job) => ({
+            localId: makeLocalId(),
+            url: job.url,
+            title: "Recovered download",
+            format_id: job.format_id,
+            label: `format ${job.format_id}`,
+            status: job.status,
+            progress: job.progress || 0,
+            file_name: job.file_name,
+            error: job.error,
+            jobId: job.id,
+          }));
+          renderQueue();
+        } catch (_err) {
+          // Ignore hydrate errors.
+        }
+      }
+
+      loadOptionsBtn.addEventListener("click", loadOptions);
+      addQueueBtn.addEventListener("click", addToQueue);
+      startAllBtn.addEventListener("click", startAllDownloads);
+      clearDoneBtn.addEventListener("click", clearCompleted);
+      showSplitFormats.addEventListener("change", renderFormatOptions);
+
+      restoreQueueFromStorage();
+      renderQueue();
+      hydrateFromServerIfNeeded().then(syncQueueFromServer).then(() => {
+        const hasActive = queue.some((item) => item.jobId && !terminalStates.has(item.status));
+        if (hasActive) {
+          ensurePolling();
+        }
+      });
+    </script>
+  </body>
+</html>

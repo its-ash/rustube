@@ -1,0 +1,17 @@
+[package]
+name = "rustube"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "macros"] }
+regex = "1.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "brotli", "gzip", "deflate"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.45", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["v4", "fast-rng"] }
