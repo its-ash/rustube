@@ -31,6 +31,7 @@ Note:
 
 - Rust (stable)
 - `yt-dlp` available in `PATH`
+- `ffmpeg` (recommended for HLS/DASH fallback streams like `.m3u8` / `.mpd`)
 
 Install `yt-dlp` (example):
 

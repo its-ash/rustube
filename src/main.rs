@@ -747,34 +747,37 @@ async fn attempt_custom_fallback_download(
 
     let file_name = format!("{file_stem} [{job_id}].{}", fallback.ext);
     let output_path = state.download_dir.join(&file_name);
-    download_direct_media(state, job_id, &fallback.media_url, &output_path).await?;
+    download_direct_media(state, job_id, page_url, &fallback.media_url, &output_path).await?;
     Ok(file_name)
 }
 
 async fn download_direct_media(
     state: &AppState,
     job_id: &str,
+    page_url: &str,
     media_url: &str,
     output_path: &Path,
 ) -> Result<(), String> {
+    let media_ext = infer_extension(media_url);
+    if media_ext == "m3u8" || media_ext == "mpd" {
+        update_job(state, job_id, |job| {
+            job.progress = 30.0;
+        })
+        .await;
+        download_adaptive_with_ffmpeg(media_url, output_path, page_url).await?;
+        return Ok(());
+    }
+
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(45))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .build()
         .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
 
-    let mut response = client
-        .get(media_url)
-        .send()
-        .await
-        .map_err(|err| format!("HTTP download failed: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "HTTP download returned status {}",
-            response.status()
-        ));
-    }
+    let origin = origin_from_url(page_url);
+    let mut response =
+        get_with_retries(&client, media_url, Some(page_url), origin.as_deref()).await?;
 
     let total = response.content_length();
     let mut file = tokio::fs::File::create(output_path)
@@ -818,22 +821,12 @@ async fn download_direct_media(
 async fn extract_fallback_media(page_url: &str) -> Result<FallbackMedia, String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .build()
         .map_err(|err| format!("Failed to create fallback HTTP client: {err}"))?;
 
-    let response = client
-        .get(page_url)
-        .send()
-        .await
-        .map_err(|err| format!("Failed to fetch page for fallback parsing: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Fallback parser got non-success page status {}",
-            response.status()
-        ));
-    }
+    let response = get_with_retries(&client, page_url, None, None).await?;
 
     let base_url = response.url().clone();
     let html = response
@@ -883,15 +876,24 @@ fn extract_media_candidates(html: &str, base_url: &Url) -> Vec<(String, String)>
     let mut raw_candidates = Vec::<String>::new();
     let patterns = [
         r#"(?is)<meta[^>]+property=["']og:video(?::url)?["'][^>]+content=["']([^"']+)["']"#,
+        r#"(?is)<meta[^>]+itemprop=["']contentUrl["'][^>]+content=["']([^"']+)["']"#,
+        r#"(?is)<video[^>]+src=["']([^"']+)["']"#,
         r#"(?is)<source[^>]+src=["']([^"']+)["']"#,
+        r#"(?is)<source[^>]+data-src=["']([^"']+)["']"#,
         r#"(?is)"file"\s*:\s*"([^"]+)""#,
+        r#"(?is)"(?:video_url|videoUrl|stream_url|streamUrl|hlsUrl|playlist|manifest)"\s*:\s*"([^"]+)""#,
         r#"(?is)"src"\s*:\s*"([^"]+?\.(?:mp4|webm|m3u8)[^"]*)""#,
+        r#"(?is)https?:\\?/\\?/[^"' <>()]+?\.(?:mp4|webm|m3u8|mpd|m4a|mp3|mov|mkv)[^"' <>()]*"#,
     ];
 
     for pattern in patterns {
         if let Ok(re) = Regex::new(pattern) {
             for caps in re.captures_iter(html) {
-                if let Some(m) = caps.get(1) {
+                if caps.len() > 1 {
+                    if let Some(m) = caps.get(1) {
+                        raw_candidates.push(m.as_str().to_string());
+                    }
+                } else if let Some(m) = caps.get(0) {
                     raw_candidates.push(m.as_str().to_string());
                 }
             }
@@ -929,8 +931,13 @@ fn extract_media_candidates(html: &str, base_url: &Url) -> Vec<(String, String)>
 
 fn unescape_candidate_url(raw: &str) -> String {
     raw.replace("\\/", "/")
+        .replace("\\x2F", "/")
+        .replace("\\u002F", "/")
         .replace("\\u0026", "&")
+        .replace("\\u003A", ":")
+        .replace("\\u003D", "=")
         .replace("&amp;", "&")
+        .replace("&quot;", "\"")
 }
 
 fn normalize_candidate_url(base_url: &Url, value: &str) -> Option<String> {
@@ -954,12 +961,104 @@ fn normalize_candidate_url(base_url: &Url, value: &str) -> Option<String> {
 
 fn infer_extension(media_url: &str) -> String {
     let lower = media_url.to_ascii_lowercase();
-    for ext in ["mp4", "webm", "m4a", "mp3", "m3u8"] {
+    for ext in ["mp4", "webm", "m4a", "mp3", "m3u8", "mpd", "mov", "mkv"] {
         if lower.contains(&format!(".{ext}")) {
             return ext.to_string();
         }
     }
     "mp4".to_string()
+}
+
+fn origin_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let scheme = parsed.scheme();
+    let host = parsed.host_str()?;
+    let mut origin = format!("{scheme}://{host}");
+    if let Some(port) = parsed.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Some(origin)
+}
+
+async fn get_with_retries(
+    client: &reqwest::Client,
+    url: &str,
+    referer: Option<&str>,
+    origin: Option<&str>,
+) -> Result<reqwest::Response, String> {
+    let mut last_error = String::new();
+
+    for attempt in 1..=3 {
+        let mut request = client.get(url);
+        if let Some(referer) = referer {
+            request = request.header("Referer", referer);
+        }
+        if let Some(origin) = origin {
+            request = request.header("Origin", origin);
+        }
+
+        match request.send().await {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                last_error = format!("HTTP status {}", response.status());
+                let retryable =
+                    response.status().is_server_error() || response.status().as_u16() == 429;
+                if retryable && attempt < 3 {
+                    sleep(Duration::from_secs(attempt as u64)).await;
+                    continue;
+                }
+                return Err(last_error);
+            }
+            Err(err) => {
+                last_error = err.to_string();
+                if attempt < 3 {
+                    sleep(Duration::from_secs(attempt as u64)).await;
+                    continue;
+                }
+            }
+        }
+    }
+
+    Err(format!("Request failed: {last_error}"))
+}
+
+async fn download_adaptive_with_ffmpeg(
+    media_url: &str,
+    output_path: &Path,
+    page_url: &str,
+) -> Result<(), String> {
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-headers")
+        .arg(format!(
+            "Referer: {page_url}\r\nUser-Agent: Mozilla/5.0\r\n"
+        ))
+        .arg("-i")
+        .arg(media_url)
+        .arg("-c")
+        .arg("copy")
+        .arg(output_path);
+
+    let output = command
+        .output()
+        .await
+        .map_err(|err| format!("ffmpeg execution failed: {err}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            Err("ffmpeg failed to download adaptive stream".to_string())
+        } else {
+            Err(format!("ffmpeg failed: {stderr}"))
+        }
+    }
 }
 
 fn html_decode_basic(value: &str) -> String {
