@@ -7,6 +7,7 @@ use axum::{
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -1444,7 +1445,7 @@ async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
     }
 
     let output_path = temp_dir.join(format!("cookies-{}.txt", Uuid::new_v4().simple()));
-    let attempts = cookie_scoop_argument_attempts(page_url, &output_path);
+    let attempts = cookie_scoop_argument_attempts(page_url);
     let timeout_secs = std::env::var("RUSTUBE_COOKIE_SCOOP_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -1467,24 +1468,23 @@ async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
 
         match output {
             Ok(output) if output.status.success() => {
-                if path_exists_and_non_empty(&output_path).await {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if write_cookie_scoop_output_file(&stdout, page_url, &output_path)
+                    .await
+                    .is_ok()
+                    && path_exists_and_non_empty(&output_path).await
+                {
                     info!("cookie-scoop cookies captured for {page_url}");
                     return Some(output_path);
                 }
 
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if looks_like_cookie_file(&stdout) {
-                    if tokio::fs::write(&output_path, stdout.as_bytes())
-                        .await
-                        .is_ok()
-                        && path_exists_and_non_empty(&output_path).await
-                    {
-                        info!("cookie-scoop cookies captured from stdout for {page_url}");
-                        return Some(output_path);
-                    }
-                }
-
-                errors.push("completed but produced no cookie file output".to_string());
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let reason = if stderr.is_empty() {
+                    "completed but did not emit parseable cookies".to_string()
+                } else {
+                    format!("completed but cookies were not parseable ({stderr})")
+                };
+                errors.push(reason);
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1514,64 +1514,21 @@ async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
     None
 }
 
-fn cookie_scoop_argument_attempts(page_url: &str, output_path: &Path) -> Vec<Vec<String>> {
-    let mut attempts = vec![
-        vec![
-            "--url".to_string(),
-            page_url.to_string(),
-            "--output".to_string(),
-            output_path.to_string_lossy().to_string(),
-        ],
-        vec![
-            "--url".to_string(),
-            page_url.to_string(),
-            "-o".to_string(),
-            output_path.to_string_lossy().to_string(),
-        ],
-        vec![
-            page_url.to_string(),
-            "--output".to_string(),
-            output_path.to_string_lossy().to_string(),
-        ],
-        vec![
-            page_url.to_string(),
-            "-o".to_string(),
-            output_path.to_string_lossy().to_string(),
-        ],
-    ];
-
-    if let Ok(parsed) = Url::parse(page_url) {
-        if let Some(host) = parsed.host_str() {
-            attempts.push(vec![
-                "--domain".to_string(),
-                host.to_string(),
-                "--output".to_string(),
-                output_path.to_string_lossy().to_string(),
-            ]);
-            attempts.push(vec![
-                host.to_string(),
-                "--output".to_string(),
-                output_path.to_string_lossy().to_string(),
-            ]);
-            attempts.push(vec![
-                host.to_string(),
-                "-o".to_string(),
-                output_path.to_string_lossy().to_string(),
-            ]);
-        }
+fn cookie_scoop_argument_attempts(page_url: &str) -> Vec<Vec<String>> {
+    let mut base = vec!["--url".to_string(), page_url.to_string()];
+    if let Some(browsers) = cookie_scoop_browsers() {
+        base.push("--browsers".to_string());
+        base.push(browsers);
     }
 
-    attempts
+    let mut with_header = base.clone();
+    with_header.push("--header".to_string());
+
+    vec![with_header, base]
 }
 
 fn is_cookie_scoop_enabled() -> bool {
-    match std::env::var("RUSTUBE_COOKIE_SCOOP_ENABLED") {
-        Ok(value) => {
-            let value = value.trim().to_ascii_lowercase();
-            !(value == "0" || value == "false" || value == "off" || value == "no")
-        }
-        Err(_) => true,
-    }
+    env_truthy("RUSTUBE_COOKIE_SCOOP_ENABLED", true)
 }
 
 fn looks_like_cookie_file(content: &str) -> bool {
@@ -1589,6 +1546,211 @@ fn looks_like_cookie_file(content: &str) -> bool {
         }
         line.split('\t').count() >= 7
     })
+}
+
+fn cookie_scoop_browsers() -> Option<String> {
+    std::env::var("RUSTUBE_COOKIE_SCOOP_BROWSERS")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("RUSTUBE_COOKIES_FROM_BROWSER")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn env_truthy(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        }
+        Err(_) => default,
+    }
+}
+
+async fn write_cookie_scoop_output_file(
+    stdout: &str,
+    page_url: &str,
+    output_path: &Path,
+) -> Result<(), String> {
+    let content = parse_cookie_scoop_output_to_netscape(stdout, page_url)
+        .ok_or_else(|| "cookie-scoop output was not recognized".to_string())?;
+    tokio::fs::write(output_path, content.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write cookie-scoop cookie file: {err}"))
+}
+
+fn parse_cookie_scoop_output_to_netscape(stdout: &str, page_url: &str) -> Option<String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if looks_like_cookie_file(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    if let Some(cookie_header) = parse_cookie_header_to_netscape(trimmed, page_url) {
+        return Some(cookie_header);
+    }
+
+    parse_cookie_json_to_netscape(trimmed, page_url)
+}
+
+fn parse_cookie_header_to_netscape(stdout: &str, page_url: &str) -> Option<String> {
+    let mut header = stdout.trim();
+    if let Some(stripped) = header
+        .strip_prefix("Cookie:")
+        .or_else(|| header.strip_prefix("cookie:"))
+    {
+        header = stripped.trim();
+    }
+
+    let parsed_url = Url::parse(page_url).ok()?;
+    let host = parsed_url.host_str()?;
+    let secure = parsed_url.scheme() == "https";
+
+    let mut lines = vec!["# Netscape HTTP Cookie File".to_string()];
+    let mut found_any = false;
+
+    for chunk in header.split(';') {
+        let cookie = chunk.trim();
+        if cookie.is_empty() {
+            continue;
+        }
+
+        let mut parts = cookie.splitn(2, '=');
+        let Some(name) = parts.next().map(str::trim).filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let value = parts.next().unwrap_or("").trim();
+
+        lines.push(format!(
+            "{host}\tFALSE\t/\t{}\t0\t{}\t{}",
+            if secure { "TRUE" } else { "FALSE" },
+            sanitize_cookie_field(name),
+            sanitize_cookie_field(value)
+        ));
+        found_any = true;
+    }
+
+    if found_any {
+        Some(lines.join("\n"))
+    } else {
+        None
+    }
+}
+
+fn parse_cookie_json_to_netscape(stdout: &str, page_url: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(stdout).ok()?;
+    let parsed_url = Url::parse(page_url).ok()?;
+    let default_host = parsed_url.host_str()?;
+    let default_secure = parsed_url.scheme() == "https";
+
+    let items = if let Some(items) = parsed.as_array() {
+        items.to_vec()
+    } else if let Some(items) = parsed.get("cookies").and_then(Value::as_array) {
+        items.to_vec()
+    } else {
+        return None;
+    };
+
+    let mut lines = vec!["# Netscape HTTP Cookie File".to_string()];
+    let mut count = 0usize;
+
+    for item in items {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+
+        let Some(name) = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+
+        let value = obj
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let domain = obj
+            .get("domain")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default_host);
+        let include_subdomains = if domain.starts_with('.') {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
+        let path = obj
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("/");
+        let secure = obj
+            .get("secure")
+            .and_then(Value::as_bool)
+            .unwrap_or(default_secure);
+        let expiry = obj
+            .get("expires")
+            .and_then(value_to_i64)
+            .or_else(|| obj.get("expirationDate").and_then(value_to_i64))
+            .or_else(|| obj.get("expiry").and_then(value_to_i64))
+            .unwrap_or(0);
+
+        lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            sanitize_cookie_field(domain),
+            include_subdomains,
+            sanitize_cookie_field(path),
+            if secure { "TRUE" } else { "FALSE" },
+            if expiry > 0 { expiry } else { 0 },
+            sanitize_cookie_field(name),
+            sanitize_cookie_field(value)
+        ));
+        count = count.saturating_add(1);
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    if let Some(v) = value.as_i64() {
+        return Some(v);
+    }
+    if let Some(v) = value.as_f64() {
+        return Some(v as i64);
+    }
+    if let Some(v) = value.as_str() {
+        if let Ok(parsed) = v.parse::<i64>() {
+            return Some(parsed);
+        }
+        if let Ok(parsed) = v.parse::<f64>() {
+            return Some(parsed as i64);
+        }
+    }
+    None
+}
+
+fn sanitize_cookie_field(value: &str) -> String {
+    value
+        .replace('\t', " ")
+        .replace('\r', "")
+        .replace('\n', "")
 }
 
 async fn path_exists_and_non_empty(path: &Path) -> bool {
@@ -1623,10 +1785,12 @@ fn cookie_browser_candidates() -> Vec<String> {
         }
     }
 
-    for browser in ["chrome", "chromium", "brave", "edge", "firefox", "safari"] {
-        let value = browser.to_string();
-        if seen.insert(value.clone()) {
-            out.push(value);
+    if out.is_empty() && env_truthy("RUSTUBE_AUTO_COOKIE_BROWSER_RETRY", false) {
+        for browser in ["chrome", "chromium", "brave", "edge", "firefox", "safari"] {
+            let value = browser.to_string();
+            if seen.insert(value.clone()) {
+                out.push(value);
+            }
         }
     }
 
