@@ -19,7 +19,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     process::Command,
     sync::RwLock,
-    time::{Duration, sleep},
+    time::{Duration, sleep, timeout},
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
@@ -446,8 +446,11 @@ fn spawn_download_worker(state: AppState, job_id: String, url: String, format_id
             .to_string_lossy()
             .to_string();
 
+        let cookie_scoop_file = maybe_extract_cookie_scoop_cookies(&url).await;
+
         let mut command = Command::new("yt-dlp");
         apply_common_yt_dlp_args(&mut command);
+        apply_yt_dlp_auth_args(&mut command, None, cookie_scoop_file.as_deref());
 
         let mut child = match command
             .arg("--no-playlist")
@@ -484,6 +487,7 @@ fn spawn_download_worker(state: AppState, job_id: String, url: String, format_id
                         .await;
                     }
                 }
+                cleanup_cookie_file(cookie_scoop_file).await;
                 return;
             }
         };
@@ -586,6 +590,8 @@ fn spawn_download_worker(state: AppState, job_id: String, url: String, format_id
                 }
             }
         }
+
+        cleanup_cookie_file(cookie_scoop_file).await;
     });
 }
 
@@ -1292,57 +1298,65 @@ impl YtDlpEntry {
 }
 
 async fn run_yt_dlp_json(url: &str) -> Result<YtDlpMetadata, AppError> {
-    let primary = run_yt_dlp_json_once(url, None).await?;
-    if primary.status.success() {
-        return serde_json::from_slice::<YtDlpMetadata>(&primary.stdout)
-            .map_err(|_| AppError::internal("Received invalid JSON from yt-dlp"));
-    }
+    let cookie_scoop_file = maybe_extract_cookie_scoop_cookies(url).await;
+    let result = async {
+        let primary = run_yt_dlp_json_once(url, None, cookie_scoop_file.as_deref()).await?;
+        if primary.status.success() {
+            return serde_json::from_slice::<YtDlpMetadata>(&primary.stdout)
+                .map_err(|_| AppError::internal("Received invalid JSON from yt-dlp"));
+        }
 
-    let primary_stderr = String::from_utf8_lossy(&primary.stderr).trim().to_string();
-    if is_youtube_bot_error(&primary_stderr) {
-        let mut retry_errors = Vec::<String>::new();
-        for browser in cookie_browser_candidates() {
-            info!("Retrying yt-dlp metadata with cookies-from-browser={browser}");
-            match run_yt_dlp_json_once(url, Some(&browser)).await {
-                Ok(output) if output.status.success() => {
-                    return serde_json::from_slice::<YtDlpMetadata>(&output.stdout).map_err(|_| {
-                        AppError::internal("Received invalid JSON from yt-dlp after cookie retry")
-                    });
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    if !stderr.is_empty() {
-                        retry_errors.push(format!("{browser}: {stderr}"));
+        let primary_stderr = String::from_utf8_lossy(&primary.stderr).trim().to_string();
+        if is_youtube_bot_error(&primary_stderr) {
+            let mut retry_errors = Vec::<String>::new();
+            for browser in cookie_browser_candidates() {
+                info!("Retrying yt-dlp metadata with cookies-from-browser={browser}");
+                match run_yt_dlp_json_once(url, Some(&browser), cookie_scoop_file.as_deref()).await {
+                    Ok(output) if output.status.success() => {
+                        return serde_json::from_slice::<YtDlpMetadata>(&output.stdout).map_err(|_| {
+                            AppError::internal("Received invalid JSON from yt-dlp after cookie retry")
+                        });
                     }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        if !stderr.is_empty() {
+                            retry_errors.push(format!("{browser}: {stderr}"));
+                        }
+                    }
+                    Err(err) => retry_errors.push(format!("{browser}: {}", err.message)),
                 }
-                Err(err) => retry_errors.push(format!("{browser}: {}", err.message)),
             }
+
+            let mut message = build_yt_dlp_failure_message(&primary_stderr);
+            if !retry_errors.is_empty() {
+                message.push_str(" Cookie retries failed: ");
+                message.push_str(&retry_errors.join(" | "));
+            }
+            return Err(AppError::bad_request(message));
         }
 
-        let mut message = build_yt_dlp_failure_message(&primary_stderr);
-        if !retry_errors.is_empty() {
-            message.push_str(" Cookie retries failed: ");
-            message.push_str(&retry_errors.join(" | "));
-        }
-        return Err(AppError::bad_request(message));
+        let message = if primary_stderr.is_empty() {
+            "Failed to read video information via yt-dlp.".to_string()
+        } else {
+            build_yt_dlp_failure_message(&primary_stderr)
+        };
+
+        Err(AppError::bad_request(message))
     }
+    .await;
 
-    let message = if primary_stderr.is_empty() {
-        "Failed to read video information via yt-dlp.".to_string()
-    } else {
-        build_yt_dlp_failure_message(&primary_stderr)
-    };
-
-    Err(AppError::bad_request(message))
+    cleanup_cookie_file(cookie_scoop_file).await;
+    result
 }
 
 async fn run_yt_dlp_json_once(
     url: &str,
     cookie_browser_override: Option<&str>,
+    cookies_file_override: Option<&Path>,
 ) -> Result<std::process::Output, AppError> {
     let mut command = Command::new("yt-dlp");
     apply_common_yt_dlp_args(&mut command);
-    apply_yt_dlp_auth_args(&mut command, cookie_browser_override);
+    apply_yt_dlp_auth_args(&mut command, cookie_browser_override, cookies_file_override);
     command
         .arg("--dump-single-json")
         .arg("--no-playlist")
@@ -1378,7 +1392,11 @@ fn apply_common_yt_dlp_args(command: &mut Command) {
         .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 }
 
-fn apply_yt_dlp_auth_args(command: &mut Command, cookie_browser_override: Option<&str>) {
+fn apply_yt_dlp_auth_args(
+    command: &mut Command,
+    cookie_browser_override: Option<&str>,
+    cookies_file_override: Option<&Path>,
+) {
     if let Some(cookie_browser) = cookie_browser_override {
         let cookie_browser = cookie_browser.trim();
         if !cookie_browser.is_empty() {
@@ -1394,10 +1412,200 @@ fn apply_yt_dlp_auth_args(command: &mut Command, cookie_browser_override: Option
         }
     }
 
+    if let Some(cookies_file) = cookies_file_override {
+        let cookies_file = cookies_file.to_string_lossy();
+        let cookies_file = cookies_file.trim();
+        if !cookies_file.is_empty() {
+            command.arg("--cookies").arg(cookies_file);
+        }
+        return;
+    }
+
     if let Ok(cookies_file) = std::env::var("RUSTUBE_COOKIES_FILE") {
         let cookies_file = cookies_file.trim();
         if !cookies_file.is_empty() {
             command.arg("--cookies").arg(cookies_file);
+        }
+    }
+}
+
+async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
+    if !is_cookie_scoop_enabled() {
+        return None;
+    }
+
+    let cookie_scoop_bin =
+        std::env::var("RUSTUBE_COOKIE_SCOOP_BIN").unwrap_or_else(|_| "cookie-scoop".to_string());
+
+    let temp_dir = std::env::temp_dir().join("rustube-cookie-scoop");
+    if let Err(err) = tokio::fs::create_dir_all(&temp_dir).await {
+        warn!("Failed to create cookie-scoop temp directory: {err}");
+        return None;
+    }
+
+    let output_path = temp_dir.join(format!("cookies-{}.txt", Uuid::new_v4().simple()));
+    let attempts = cookie_scoop_argument_attempts(page_url, &output_path);
+    let timeout_secs = std::env::var("RUSTUBE_COOKIE_SCOOP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(20);
+
+    let mut errors = Vec::<String>::new();
+
+    for args in attempts {
+        let mut command = Command::new(&cookie_scoop_bin);
+        command.args(&args);
+
+        let output = match timeout(Duration::from_secs(timeout_secs), command.output()).await {
+            Ok(result) => result,
+            Err(_) => {
+                errors.push(format!("timed out after {timeout_secs}s"));
+                continue;
+            }
+        };
+
+        match output {
+            Ok(output) if output.status.success() => {
+                if path_exists_and_non_empty(&output_path).await {
+                    info!("cookie-scoop cookies captured for {page_url}");
+                    return Some(output_path);
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if looks_like_cookie_file(&stdout) {
+                    if tokio::fs::write(&output_path, stdout.as_bytes())
+                        .await
+                        .is_ok()
+                        && path_exists_and_non_empty(&output_path).await
+                    {
+                        info!("cookie-scoop cookies captured from stdout for {page_url}");
+                        return Some(output_path);
+                    }
+                }
+
+                errors.push("completed but produced no cookie file output".to_string());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let error_text = if stderr.is_empty() {
+                    format!("exit {}", output.status)
+                } else {
+                    stderr
+                };
+                errors.push(error_text);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                info!(
+                    "cookie-scoop is not installed (set RUSTUBE_COOKIE_SCOOP_BIN or install cookie-scoop)"
+                );
+                return None;
+            }
+            Err(err) => {
+                errors.push(format!("failed to start cookie-scoop: {err}"));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        warn!("cookie-scoop did not produce cookies for {page_url}: {}", errors.join(" | "));
+    }
+    let _ = tokio::fs::remove_file(&output_path).await;
+    None
+}
+
+fn cookie_scoop_argument_attempts(page_url: &str, output_path: &Path) -> Vec<Vec<String>> {
+    let mut attempts = vec![
+        vec![
+            "--url".to_string(),
+            page_url.to_string(),
+            "--output".to_string(),
+            output_path.to_string_lossy().to_string(),
+        ],
+        vec![
+            "--url".to_string(),
+            page_url.to_string(),
+            "-o".to_string(),
+            output_path.to_string_lossy().to_string(),
+        ],
+        vec![
+            page_url.to_string(),
+            "--output".to_string(),
+            output_path.to_string_lossy().to_string(),
+        ],
+        vec![
+            page_url.to_string(),
+            "-o".to_string(),
+            output_path.to_string_lossy().to_string(),
+        ],
+    ];
+
+    if let Ok(parsed) = Url::parse(page_url) {
+        if let Some(host) = parsed.host_str() {
+            attempts.push(vec![
+                "--domain".to_string(),
+                host.to_string(),
+                "--output".to_string(),
+                output_path.to_string_lossy().to_string(),
+            ]);
+            attempts.push(vec![
+                host.to_string(),
+                "--output".to_string(),
+                output_path.to_string_lossy().to_string(),
+            ]);
+            attempts.push(vec![
+                host.to_string(),
+                "-o".to_string(),
+                output_path.to_string_lossy().to_string(),
+            ]);
+        }
+    }
+
+    attempts
+}
+
+fn is_cookie_scoop_enabled() -> bool {
+    match std::env::var("RUSTUBE_COOKIE_SCOOP_ENABLED") {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+fn looks_like_cookie_file(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains("# Netscape HTTP Cookie File") {
+        return true;
+    }
+
+    trimmed.lines().any(|line| {
+        if line.starts_with('#') {
+            return false;
+        }
+        line.split('\t').count() >= 7
+    })
+}
+
+async fn path_exists_and_non_empty(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => meta.is_file() && meta.len() > 0,
+        Err(_) => false,
+    }
+}
+
+async fn cleanup_cookie_file(path: Option<PathBuf>) {
+    let Some(path) = path else {
+        return;
+    };
+
+    if let Err(err) = tokio::fs::remove_file(&path).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to remove temporary cookie file {}: {err}", path.display());
         }
     }
 }

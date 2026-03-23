@@ -55,6 +55,15 @@ Optional cookie support for blocked/login-required sites:
 
 - `RUSTUBE_COOKIES_FROM_BROWSER` (example: `chrome`, `firefox`, `safari`)
 - `RUSTUBE_COOKIES_FILE` (path to Netscape-format cookies.txt)
+- `RUSTUBE_COOKIE_SCOOP_ENABLED` (`true` by default, set `false` to disable auto cookie-scoop attempts)
+- `RUSTUBE_COOKIE_SCOOP_BIN` (default: `cookie-scoop`)
+- `RUSTUBE_COOKIE_SCOOP_TIMEOUT_SECS` (default: `20`)
+
+`cookie-scoop` integration:
+
+- When enabled, Rustube tries `cookie-scoop` to export cookies for the target URL.
+- The temporary cookie file is passed to `yt-dlp --cookies ...` and then deleted after use.
+- If `cookie-scoop` is not installed or fails, Rustube falls back to the existing cookie methods.
 
 Example:
 
