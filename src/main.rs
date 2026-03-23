@@ -236,7 +236,8 @@ async fn fetch_options(
 
     match run_yt_dlp_json(&normalized_url).await {
         Ok(metadata) => {
-            let mut options = extract_video_options(&metadata.formats);
+            let resolved_formats = metadata.resolved_formats();
+            let mut options = extract_video_options(&resolved_formats);
 
             options.sort_by(|a, b| {
                 b.height
@@ -253,9 +254,11 @@ async fn fetch_options(
 
             Ok(AxumJson(OptionsResponse {
                 title: metadata
-                    .title
+                    .resolved_title()
                     .unwrap_or_else(|| "Untitled video".to_string()),
-                extractor: metadata.extractor.unwrap_or_else(|| "unknown".to_string()),
+                extractor: metadata
+                    .resolved_extractor()
+                    .unwrap_or_else(|| "unknown".to_string()),
                 options,
             }))
         }
@@ -1159,10 +1162,13 @@ fn validate_format_id(format_id: &str) -> Result<(), AppError> {
 struct YtDlpMetadata {
     title: Option<String>,
     extractor: Option<String>,
-    formats: Vec<YtDlpFormat>,
+    #[serde(default)]
+    formats: Option<Vec<YtDlpFormat>>,
+    #[serde(default)]
+    entries: Option<Vec<YtDlpEntry>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct YtDlpFormat {
     format_id: String,
     ext: Option<String>,
@@ -1176,32 +1182,174 @@ struct YtDlpFormat {
     acodec: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct YtDlpEntry {
+    title: Option<String>,
+    extractor: Option<String>,
+    #[serde(default)]
+    formats: Option<Vec<YtDlpFormat>>,
+    format_id: Option<String>,
+    ext: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    resolution: Option<String>,
+    format_note: Option<String>,
+    filesize: Option<u64>,
+    filesize_approx: Option<u64>,
+    vcodec: Option<String>,
+    acodec: Option<String>,
+    url: Option<String>,
+}
+
+impl YtDlpMetadata {
+    fn resolved_title(&self) -> Option<String> {
+        self.title.clone().or_else(|| {
+            self.entries
+                .as_ref()
+                .and_then(|entries| entries.iter().find_map(|entry| entry.title.clone()))
+        })
+    }
+
+    fn resolved_extractor(&self) -> Option<String> {
+        self.extractor.clone().or_else(|| {
+            self.entries
+                .as_ref()
+                .and_then(|entries| entries.iter().find_map(|entry| entry.extractor.clone()))
+        })
+    }
+
+    fn resolved_formats(&self) -> Vec<YtDlpFormat> {
+        if let Some(formats) = self.formats.as_ref().filter(|formats| !formats.is_empty()) {
+            return formats.clone();
+        }
+
+        if let Some(entries) = self.entries.as_ref() {
+            for entry in entries {
+                if let Some(formats) = entry.formats.as_ref().filter(|formats| !formats.is_empty()) {
+                    return formats.clone();
+                }
+            }
+
+            let synthesized: Vec<YtDlpFormat> = entries
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, entry)| entry.to_single_format(idx))
+                .collect();
+            if !synthesized.is_empty() {
+                return synthesized;
+            }
+        }
+
+        Vec::new()
+    }
+}
+
+impl YtDlpEntry {
+    fn to_single_format(&self, index: usize) -> Option<YtDlpFormat> {
+        let has_media_hint = self
+            .url
+            .as_deref()
+            .map(|value| value.starts_with("http://") || value.starts_with("https://"))
+            .unwrap_or(false)
+            || self
+                .ext
+                .as_deref()
+                .map(|value| !value.is_empty() && value != "none")
+                .unwrap_or(false)
+            || self
+                .format_id
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+
+        if !has_media_hint {
+            return None;
+        }
+
+        Some(YtDlpFormat {
+            format_id: self
+                .format_id
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if index == 0 {
+                        "best".to_string()
+                    } else {
+                        format!("best-{index}")
+                    }
+                }),
+            ext: self.ext.clone(),
+            width: self.width,
+            height: self.height,
+            resolution: self.resolution.clone(),
+            format_note: self.format_note.clone(),
+            filesize: self.filesize,
+            filesize_approx: self.filesize_approx,
+            vcodec: self.vcodec.clone(),
+            acodec: self.acodec.clone(),
+        })
+    }
+}
+
 async fn run_yt_dlp_json(url: &str) -> Result<YtDlpMetadata, AppError> {
+    let primary = run_yt_dlp_json_once(url, None).await?;
+    if primary.status.success() {
+        return serde_json::from_slice::<YtDlpMetadata>(&primary.stdout)
+            .map_err(|_| AppError::internal("Received invalid JSON from yt-dlp"));
+    }
+
+    let primary_stderr = String::from_utf8_lossy(&primary.stderr).trim().to_string();
+    if is_youtube_bot_error(&primary_stderr) {
+        let mut retry_errors = Vec::<String>::new();
+        for browser in cookie_browser_candidates() {
+            info!("Retrying yt-dlp metadata with cookies-from-browser={browser}");
+            match run_yt_dlp_json_once(url, Some(&browser)).await {
+                Ok(output) if output.status.success() => {
+                    return serde_json::from_slice::<YtDlpMetadata>(&output.stdout).map_err(|_| {
+                        AppError::internal("Received invalid JSON from yt-dlp after cookie retry")
+                    });
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    if !stderr.is_empty() {
+                        retry_errors.push(format!("{browser}: {stderr}"));
+                    }
+                }
+                Err(err) => retry_errors.push(format!("{browser}: {}", err.message)),
+            }
+        }
+
+        let mut message = build_yt_dlp_failure_message(&primary_stderr);
+        if !retry_errors.is_empty() {
+            message.push_str(" Cookie retries failed: ");
+            message.push_str(&retry_errors.join(" | "));
+        }
+        return Err(AppError::bad_request(message));
+    }
+
+    let message = if primary_stderr.is_empty() {
+        "Failed to read video information via yt-dlp.".to_string()
+    } else {
+        build_yt_dlp_failure_message(&primary_stderr)
+    };
+
+    Err(AppError::bad_request(message))
+}
+
+async fn run_yt_dlp_json_once(
+    url: &str,
+    cookie_browser_override: Option<&str>,
+) -> Result<std::process::Output, AppError> {
     let mut command = Command::new("yt-dlp");
     apply_common_yt_dlp_args(&mut command);
-    let output = command
+    apply_yt_dlp_auth_args(&mut command, cookie_browser_override);
+    command
         .arg("--dump-single-json")
         .arg("--no-playlist")
         .arg(url)
         .output()
         .await
-        .map_err(|err| AppError::internal(map_yt_dlp_process_error(err)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-
-        let message = if stderr.is_empty() {
-            "Failed to read video information via yt-dlp.".to_string()
-        } else {
-            build_yt_dlp_failure_message(stderr)
-        };
-
-        return Err(AppError::bad_request(message));
-    }
-
-    serde_json::from_slice::<YtDlpMetadata>(&output.stdout)
-        .map_err(|_| AppError::internal("Received invalid JSON from yt-dlp"))
+        .map_err(|err| AppError::internal(map_yt_dlp_process_error(err)))
 }
 
 fn map_yt_dlp_process_error(err: std::io::Error) -> String {
@@ -1228,11 +1376,20 @@ fn apply_common_yt_dlp_args(command: &mut Command) {
         .arg("30")
         .arg("--user-agent")
         .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+}
 
-    // Optional env-based cookies for sites that block unauthenticated/bot traffic.
-    if let Ok(browser) = std::env::var("RUSTUBE_COOKIES_FROM_BROWSER") {
-        let browser = browser.trim();
-        if !browser.is_empty() {
+fn apply_yt_dlp_auth_args(command: &mut Command, cookie_browser_override: Option<&str>) {
+    if let Some(cookie_browser) = cookie_browser_override {
+        let cookie_browser = cookie_browser.trim();
+        if !cookie_browser.is_empty() {
+            command.arg("--cookies-from-browser").arg(cookie_browser);
+        }
+    } else if let Ok(browser) = std::env::var("RUSTUBE_COOKIES_FROM_BROWSER") {
+        let browser = browser
+            .split(',')
+            .map(str::trim)
+            .find(|item| !item.is_empty());
+        if let Some(browser) = browser {
             command.arg("--cookies-from-browser").arg(browser);
         }
     }
@@ -1243,6 +1400,36 @@ fn apply_common_yt_dlp_args(command: &mut Command) {
             command.arg("--cookies").arg(cookies_file);
         }
     }
+}
+
+fn cookie_browser_candidates() -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+
+    if let Ok(from_env) = std::env::var("RUSTUBE_COOKIES_FROM_BROWSER") {
+        for browser in from_env.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+            let value = browser.to_string();
+            if seen.insert(value.clone()) {
+                out.push(value);
+            }
+        }
+    }
+
+    for browser in ["chrome", "chromium", "brave", "edge", "firefox", "safari"] {
+        let value = browser.to_string();
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+
+    out
+}
+
+fn is_youtube_bot_error(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase().replace('’', "'");
+    lowered.contains("sign in to confirm you're not a bot")
+        || lowered.contains("sign in to confirm you’re not a bot")
+        || lowered.contains("use --cookies-from-browser or --cookies")
 }
 
 fn build_yt_dlp_failure_message(stderr: &str) -> String {
