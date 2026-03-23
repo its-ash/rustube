@@ -267,6 +267,23 @@
         font-size: 0.9rem;
       }
 
+      .site-footer {
+        margin-top: 14px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .site-footer a {
+        color: var(--brand);
+        text-decoration: none;
+        font-weight: 600;
+      }
+
+      .site-footer a:hover {
+        text-decoration: underline;
+      }
+
       @media (max-width: 980px) {
         .grid {
           grid-template-columns: 1fr;
@@ -327,6 +344,13 @@
           <p id="queue-empty" class="muted" style="margin-top: 12px">Queue is empty.</p>
         </article>
       </section>
+
+      <footer class="site-footer">
+        Made by Ashvini Jangid |
+        <a href="https://its-ash.github.io/" target="_blank" rel="noopener noreferrer">
+          https://its-ash.github.io/
+        </a>
+      </footer>
     </div>
 
     <script>
