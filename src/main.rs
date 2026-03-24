@@ -553,10 +553,23 @@ fn spawn_download_worker(state: AppState, job_id: String, url: String, format_id
                     .unwrap_or_else(|| format!("Download process exited with status {status}"));
 
                 if is_youtube_bot_error(&yt_error) {
+                    let cookie_hint = if is_youtube_url(&url) {
+                        if let Some(cookie_file) = cookie_scoop_file.as_deref() {
+                            if !has_probable_youtube_auth_cookie(cookie_file).await {
+                                " Captured cookies look unauthenticated for YouTube (missing SID/HSID/SSID/SAPISID)."
+                            } else {
+                                ""
+                            }
+                        } else {
+                            ""
+                        }
+                    } else {
+                        ""
+                    };
                     update_job(&state, &job_id, |job| {
                         job.status = DownloadStatusKind::Failed;
                         job.error = Some(format!(
-                            "{yt_error}. Configure authenticated cookies via RUSTUBE_COOKIES_FILE or RUSTUBE_COOKIES_HEADER."
+                            "{yt_error}.{cookie_hint} Configure authenticated cookies via RUSTUBE_COOKIES_FILE or RUSTUBE_COOKIES_HEADER."
                         ));
                     })
                     .await;
@@ -1349,6 +1362,15 @@ async fn run_yt_dlp_json(url: &str) -> Result<YtDlpMetadata, AppError> {
                 message.push_str(" Cookie retries failed: ");
                 message.push_str(&retry_errors.join(" | "));
             }
+            if is_youtube_url(url) {
+                if let Some(cookie_file) = cookie_scoop_file.as_deref() {
+                    if !has_probable_youtube_auth_cookie(cookie_file).await {
+                        message.push_str(
+                            " Captured cookies look unauthenticated for YouTube (missing SID/HSID/SSID/SAPISID).",
+                        );
+                    }
+                }
+            }
             message.push_str(
                 " Configure authenticated cookies via RUSTUBE_COOKIES_FILE or RUSTUBE_COOKIES_HEADER.",
             );
@@ -1574,6 +1596,37 @@ fn cookie_scoop_argument_attempts(page_url: &str) -> Vec<Vec<String>> {
     vec![with_header, base]
 }
 
+fn best_cookie_domain_for_host(host: &str) -> String {
+    let host = host.trim().trim_start_matches('.');
+    if host.is_empty() {
+        return "localhost".to_string();
+    }
+
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() >= 2 {
+        format!(".{}.{}", labels[labels.len() - 2], labels[labels.len() - 1])
+    } else {
+        host.to_string()
+    }
+}
+
+fn is_youtube_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .map(|host| host.contains("youtube.com") || host == "youtu.be")
+        .unwrap_or(false)
+}
+
+async fn has_probable_youtube_auth_cookie(cookie_file: &Path) -> bool {
+    let Ok(content) = tokio::fs::read_to_string(cookie_file).await else {
+        return false;
+    };
+
+    let keys = ["\tSID\t", "\tHSID\t", "\tSSID\t", "\tSAPISID\t", "\tLOGIN_INFO\t"];
+    keys.iter().any(|needle| content.contains(needle))
+}
+
 fn is_cookie_scoop_enabled() -> bool {
     env_truthy("RUSTUBE_COOKIE_SCOOP_ENABLED", true)
 }
@@ -1658,7 +1711,13 @@ fn parse_cookie_header_to_netscape(stdout: &str, page_url: &str) -> Option<Strin
 
     let parsed_url = Url::parse(page_url).ok()?;
     let host = parsed_url.host_str()?;
+    let cookie_domain = best_cookie_domain_for_host(host);
     let secure = parsed_url.scheme() == "https";
+    let include_subdomains = if cookie_domain.starts_with('.') {
+        "TRUE"
+    } else {
+        "FALSE"
+    };
 
     let mut lines = vec!["# Netscape HTTP Cookie File".to_string()];
     let mut found_any = false;
@@ -1676,7 +1735,7 @@ fn parse_cookie_header_to_netscape(stdout: &str, page_url: &str) -> Option<Strin
         let value = parts.next().unwrap_or("").trim();
 
         lines.push(format!(
-            "{host}\tFALSE\t/\t{}\t0\t{}\t{}",
+            "{cookie_domain}\t{include_subdomains}\t/\t{}\t0\t{}\t{}",
             if secure { "TRUE" } else { "FALSE" },
             sanitize_cookie_field(name),
             sanitize_cookie_field(value)
