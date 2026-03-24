@@ -263,26 +263,32 @@ async fn fetch_options(
                 options,
             }))
         }
-        Err(yt_err) => match extract_fallback_media(&normalized_url).await {
-            Ok(media) => Ok(AxumJson(OptionsResponse {
-                title: media.title.unwrap_or_else(|| "Untitled video".to_string()),
-                extractor: "custom_rust_fallback".to_string(),
-                options: vec![VideoOption {
-                    format_id: "best".to_string(),
-                    ext: media.ext,
-                    resolution: "Unknown".to_string(),
-                    size_bytes: None,
-                    size_label: "Unknown".to_string(),
-                    note: "Direct media URL (custom Rust fallback)".to_string(),
-                    height: None,
-                    media_kind: MediaKind::AudioVideo,
-                }],
-            })),
-            Err(fallback_err) => Err(AppError::bad_request(format!(
-                "{} Fallback failed: {fallback_err}",
-                yt_err.message
-            ))),
-        },
+        Err(yt_err) => {
+            if is_youtube_bot_error(&yt_err.message) {
+                return Err(yt_err);
+            }
+
+            match extract_fallback_media(&normalized_url).await {
+                Ok(media) => Ok(AxumJson(OptionsResponse {
+                    title: media.title.unwrap_or_else(|| "Untitled video".to_string()),
+                    extractor: "custom_rust_fallback".to_string(),
+                    options: vec![VideoOption {
+                        format_id: "best".to_string(),
+                        ext: media.ext,
+                        resolution: "Unknown".to_string(),
+                        size_bytes: None,
+                        size_label: "Unknown".to_string(),
+                        note: "Direct media URL (custom Rust fallback)".to_string(),
+                        height: None,
+                        media_kind: MediaKind::AudioVideo,
+                    }],
+                })),
+                Err(fallback_err) => Err(AppError::bad_request(format!(
+                    "{} Fallback failed: {fallback_err}",
+                    yt_err.message
+                ))),
+            }
+        }
     }
 }
 
@@ -546,24 +552,34 @@ fn spawn_download_worker(state: AppState, job_id: String, url: String, format_id
                 let yt_error = prior_error
                     .unwrap_or_else(|| format!("Download process exited with status {status}"));
 
-                match attempt_custom_fallback_download(&state, &job_id, &url).await {
-                    Ok(file_name) => {
-                        update_job(&state, &job_id, |job| {
-                            job.status = DownloadStatusKind::Completed;
-                            job.progress = 100.0;
-                            job.file_name = Some(file_name.clone());
-                            job.error = None;
-                        })
-                        .await;
-                    }
-                    Err(fallback_error) => {
-                        update_job(&state, &job_id, |job| {
-                            job.status = DownloadStatusKind::Failed;
-                            job.error = Some(format!(
-                                "{yt_error}. Rust fallback failed: {fallback_error}"
-                            ));
-                        })
-                        .await;
+                if is_youtube_bot_error(&yt_error) {
+                    update_job(&state, &job_id, |job| {
+                        job.status = DownloadStatusKind::Failed;
+                        job.error = Some(format!(
+                            "{yt_error}. Configure authenticated cookies via RUSTUBE_COOKIES_FILE or RUSTUBE_COOKIES_HEADER."
+                        ));
+                    })
+                    .await;
+                } else {
+                    match attempt_custom_fallback_download(&state, &job_id, &url).await {
+                        Ok(file_name) => {
+                            update_job(&state, &job_id, |job| {
+                                job.status = DownloadStatusKind::Completed;
+                                job.progress = 100.0;
+                                job.file_name = Some(file_name.clone());
+                                job.error = None;
+                            })
+                            .await;
+                        }
+                        Err(fallback_error) => {
+                            update_job(&state, &job_id, |job| {
+                                job.status = DownloadStatusKind::Failed;
+                                job.error = Some(format!(
+                                    "{yt_error}. Rust fallback failed: {fallback_error}"
+                                ));
+                            })
+                            .await;
+                        }
                     }
                 }
             }
@@ -1333,6 +1349,9 @@ async fn run_yt_dlp_json(url: &str) -> Result<YtDlpMetadata, AppError> {
                 message.push_str(" Cookie retries failed: ");
                 message.push_str(&retry_errors.join(" | "));
             }
+            message.push_str(
+                " Configure authenticated cookies via RUSTUBE_COOKIES_FILE or RUSTUBE_COOKIES_HEADER.",
+            );
             return Err(AppError::bad_request(message));
         }
 
@@ -1431,6 +1450,10 @@ fn apply_yt_dlp_auth_args(
 }
 
 async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
+    if let Some(path) = maybe_extract_inline_cookie_file(page_url).await {
+        return Some(path);
+    }
+
     if !is_cookie_scoop_enabled() {
         return None;
     }
@@ -1512,6 +1535,30 @@ async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
     }
     let _ = tokio::fs::remove_file(&output_path).await;
     None
+}
+
+async fn maybe_extract_inline_cookie_file(page_url: &str) -> Option<PathBuf> {
+    let inline = std::env::var("RUSTUBE_COOKIES_HEADER")
+        .ok()
+        .or_else(|| std::env::var("RUSTUBE_YOUTUBE_COOKIE_HEADER").ok())?;
+    let inline = inline.trim();
+    if inline.is_empty() {
+        return None;
+    }
+
+    let content = parse_cookie_header_to_netscape(inline, page_url)?;
+    let temp_dir = std::env::temp_dir().join("rustube-inline-cookies");
+    if tokio::fs::create_dir_all(&temp_dir).await.is_err() {
+        return None;
+    }
+
+    let output_path = temp_dir.join(format!("inline-{}.txt", Uuid::new_v4().simple()));
+    if tokio::fs::write(&output_path, content.as_bytes()).await.is_ok() {
+        info!("Using inline cookie header from env for {page_url}");
+        Some(output_path)
+    } else {
+        None
+    }
 }
 
 fn cookie_scoop_argument_attempts(page_url: &str) -> Vec<Vec<String>> {
