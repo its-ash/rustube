@@ -4,7 +4,7 @@ module.exports = {
       name: "rustube",
       cwd: __dirname,
       script: "bash",
-      args: ["-lc", "cargo build --release && exec ./target/release/rustube"],
+      args: ["-lc", "set -a; [ -f ./.env ] && . ./.env; set +a; cargo build --release && exec ./target/release/rustube"],
       interpreter: "none",
       instances: 1,
       exec_mode: "fork",

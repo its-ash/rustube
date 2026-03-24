@@ -45,6 +45,8 @@ python3 -m pip install -U yt-dlp
 cargo run
 ```
 
+For PM2 deploys, environment variables can be stored in `.env` (auto-loaded by `ecosystem.config.js`).
+
 Open: [http://localhost:3000](http://localhost:3000)
 
 Downloaded files are saved in:
