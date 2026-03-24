@@ -59,7 +59,7 @@ Optional cookie support for blocked/login-required sites:
 - `RUSTUBE_COOKIES_FILE` (path to Netscape-format cookies.txt)
 - `RUSTUBE_COOKIES_HEADER` (raw `Cookie:` header value; server converts it to temporary Netscape cookies file)
 - `RUSTUBE_YOUTUBE_COOKIE_HEADER` (same as above, legacy alias)
-- `RUSTUBE_COOKIE_SCOOP_ENABLED` (`true` by default, set `false` to disable auto cookie-scoop attempts)
+- `RUSTUBE_COOKIE_SCOOP_ENABLED` (`false` by default, set `true` to enable cookie-scoop attempts)
 - `RUSTUBE_COOKIE_SCOOP_BIN` (default: `cookie-scoop`)
 - `RUSTUBE_COOKIE_SCOOP_TIMEOUT_SECS` (default: `20`)
 - `RUSTUBE_COOKIE_SCOOP_BROWSERS` (optional, comma-separated, e.g. `firefox,chrome`)
@@ -70,6 +70,7 @@ Optional cookie support for blocked/login-required sites:
 - When enabled, Rustube runs `cookie-scoop --url <target>` (and `--header`) to collect cookies for the target URL.
 - The temporary cookie file is passed to `yt-dlp --cookies ...` and then deleted after use.
 - If `cookie-scoop` is not installed or fails, Rustube falls back to the existing cookie methods.
+- If `RUSTUBE_COOKIES_FILE` is set, Rustube uses that file and skips cookie-scoop.
 - On Linux servers without browser profiles, prefer `RUSTUBE_COOKIES_FILE` or `RUSTUBE_COOKIES_HEADER`.
 - For YouTube bot-check failures, make sure cookies are from a signed-in YouTube account (look for cookies like `SID` / `HSID` / `SSID` / `SAPISID`).
 

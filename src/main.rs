@@ -1472,6 +1472,10 @@ fn apply_yt_dlp_auth_args(
 }
 
 async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
+    if has_explicit_cookies_file() {
+        return None;
+    }
+
     if let Some(path) = maybe_extract_inline_cookie_file(page_url).await {
         return Some(path);
     }
@@ -1628,7 +1632,15 @@ async fn has_probable_youtube_auth_cookie(cookie_file: &Path) -> bool {
 }
 
 fn is_cookie_scoop_enabled() -> bool {
-    env_truthy("RUSTUBE_COOKIE_SCOOP_ENABLED", true)
+    env_truthy("RUSTUBE_COOKIE_SCOOP_ENABLED", false)
+}
+
+fn has_explicit_cookies_file() -> bool {
+    std::env::var("RUSTUBE_COOKIES_FILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
 }
 
 fn looks_like_cookie_file(content: &str) -> bool {
