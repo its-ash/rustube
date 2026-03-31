@@ -74,7 +74,7 @@ For sites requiring authentication, Rustube automatically uses Puppeteer to scra
 - If valid cookies exist, they are used directly (no browser scraping needed)
 - If no valid cookies exist, Rustube automatically launches a headless browser
 - The browser navigates to the target URL and waits for cookies to be set
-- Cookies are saved in Netscape format to `cookies.txt` and passed to yt-dlp
+- Cookies are saved in **proper Netscape format** to `cookies.txt` and passed to yt-dlp
 - Set `RUSTUBE_PUPPETEER_ENABLED=false` to disable this feature
 - Configure timeout with `RUSTUBE_PUPPETEER_TIMEOUT_SECS` (default: 60 seconds)
 
