@@ -65,13 +65,31 @@ Optional cookie support for blocked/login-required sites:
 - `RUSTUBE_COOKIE_SCOOP_BROWSERS` (optional, comma-separated, e.g. `firefox,chrome`)
 - `RUSTUBE_AUTO_COOKIE_BROWSER_RETRY` (default `false`; set `true` to probe fallback browser profiles automatically)
 
-`cookie-scoop` integration:
+### Scraping Cookies with Puppeteer
 
-- When enabled, Rustube runs `cookie-scoop --url <target>` (and `--header`) to collect cookies for the target URL.
-- The temporary cookie file is passed to `yt-dlp --cookies ...` and then deleted after use.
-- If `cookie-scoop` is not installed or fails, Rustube falls back to the existing cookie methods.
-- If `RUSTUBE_COOKIES_FILE` is set, Rustube uses that file and skips cookie-scoop.
-- On Linux servers without browser profiles, prefer `RUSTUBE_COOKIES_FILE` or `RUSTUBE_COOKIES_HEADER`.
+For sites requiring authentication, Rustube automatically uses Puppeteer to scrape cookies in headless mode:
+
+- By default, Puppeteer is enabled (`RUSTUBE_PUPPETEER_ENABLED=true`)
+- When downloading from sites that need cookies, Rustube automatically launches a headless browser
+- The browser navigates to the target URL and waits for cookies to be set
+- Cookies are saved in Netscape format and passed to yt-dlp
+- Set `RUSTUBE_PUPPETEER_ENABLED=false` to disable this feature
+- Configure timeout with `RUSTUBE_PUPPETEER_TIMEOUT_SECS` (default: 30 seconds)
+
+Manual cookie scraping (legacy):
+
+1. Install Node.js dependencies: `npm install`
+2. Run the scraper: `node scrape-cookies.js <URL>` (e.g., `node scrape-cookies.js https://www.youtube.com`)
+3. The script runs headless and automatically saves cookies to `cookies.txt`
+4. The cookies will be used automatically if `RUSTUBE_COOKIES_FILE=./cookies.txt` is set (default in `.env`).
+
+`cookie-scoop` integration (fallback):
+
+- When Puppeteer fails or is disabled, Rustube tries `cookie-scoop` if enabled
+- The temporary cookie file is passed to `yt-dlp --cookies ...` and then deleted after use
+- If `cookie-scoop` is not installed or fails, Rustube falls back to the existing cookie methods
+- If `RUSTUBE_COOKIES_FILE` is set, Rustube uses that file and skips automatic cookie extraction
+- On Linux servers without browser profiles, prefer `RUSTUBE_COOKIES_FILE` or `RUSTUBE_COOKIES_HEADER`
 - For YouTube bot-check failures, make sure cookies are from a signed-in YouTube account (look for cookies like `SID` / `HSID` / `SSID` / `SAPISID`).
 
 Example:

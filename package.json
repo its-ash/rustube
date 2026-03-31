@@ -1,0 +1,12 @@
+{
+  "name": "rustube-cookie-scraper",
+  "version": "1.0.0",
+  "description": "Scrape cookies using Puppeteer for Rustube",
+  "main": "scrape-cookies.js",
+  "scripts": {
+    "scrape": "node scrape-cookies.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.40.0"
+  }
+}

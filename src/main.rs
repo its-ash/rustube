@@ -55,6 +55,8 @@ async fn main() {
         download_dir: download_dir.clone(),
     };
 
+    log_cookie_auth_health().await;
+
     // Run one cleanup on startup and then periodically remove stale files/jobs.
     cleanup_old_files_and_jobs(&state).await;
     let cleanup_state = state.clone();
@@ -89,6 +91,46 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("server failed unexpectedly");
+}
+
+async fn log_cookie_auth_health() {
+    let cookies_file = std::env::var("RUSTUBE_COOKIES_FILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let cookies_header = std::env::var("RUSTUBE_COOKIES_HEADER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    if let Some(path) = cookies_file {
+        let path_buf = PathBuf::from(&path);
+        match tokio::fs::read_to_string(&path_buf).await {
+            Ok(content) => {
+                if content.trim().is_empty() {
+                    warn!("RUSTUBE_COOKIES_FILE is set to {path} but file is empty.");
+                } else {
+                    let has_auth = has_probable_youtube_auth_cookie_content(&content);
+                    if has_auth {
+                        info!("RUSTUBE_COOKIES_FILE loaded with probable YouTube auth cookies.");
+                    } else {
+                        warn!(
+                            "RUSTUBE_COOKIES_FILE loaded but missing probable YouTube auth cookie keys (SID/HSID/SSID/SAPISID/LOGIN_INFO)."
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                warn!("RUSTUBE_COOKIES_FILE is set to {path} but could not be read: {err}");
+            }
+        }
+    } else if cookies_header.is_some() {
+        info!("Using RUSTUBE_COOKIES_HEADER for yt-dlp cookie auth.");
+    } else {
+        warn!(
+            "No explicit cookie auth configured (RUSTUBE_COOKIES_FILE / RUSTUBE_COOKIES_HEADER). Some YouTube links may fail bot-check."
+        );
+    }
 }
 
 async fn index_handler() -> Html<&'static str> {
@@ -1480,6 +1522,11 @@ async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
         return Some(path);
     }
 
+    // Try Puppeteer first for headless cookie scraping
+    if let Some(path) = maybe_extract_puppeteer_cookies(page_url).await {
+        return Some(path);
+    }
+
     if !is_cookie_scoop_enabled() {
         return None;
     }
@@ -1587,6 +1634,80 @@ async fn maybe_extract_inline_cookie_file(page_url: &str) -> Option<PathBuf> {
     }
 }
 
+async fn maybe_extract_puppeteer_cookies(page_url: &str) -> Option<PathBuf> {
+    if !is_puppeteer_enabled() {
+        return None;
+    }
+
+    let temp_dir = std::env::temp_dir().join("rustube-puppeteer-cookies");
+    if let Err(err) = tokio::fs::create_dir_all(&temp_dir).await {
+        warn!("Failed to create puppeteer temp directory: {err}");
+        return None;
+    }
+
+    let output_path = temp_dir.join(format!("cookies-{}.txt", Uuid::new_v4().simple()));
+    let timeout_secs = std::env::var("RUSTUBE_PUPPETEER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30);
+
+    let mut command = Command::new("node");
+    command
+        .arg("scrape-cookies.js")
+        .arg(page_url)
+        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let output = match timeout(Duration::from_secs(timeout_secs), command.output()).await {
+        Ok(result) => result,
+        Err(_) => {
+            warn!("Puppeteer cookie scraping timed out after {timeout_secs}s for {page_url}");
+            return None;
+        }
+    };
+
+    match output {
+        Ok(output) if output.status.success() => {
+            // Check if cookies.txt was created
+            let cookies_file = PathBuf::from("cookies.txt");
+            if cookies_file.exists() {
+                match tokio::fs::copy(&cookies_file, &output_path).await {
+                    Ok(_) => {
+                        info!("Puppeteer cookies captured for {page_url}");
+                        let _ = tokio::fs::remove_file(&cookies_file).await; // Clean up
+                        Some(output_path)
+                    }
+                    Err(err) => {
+                        warn!("Failed to copy puppeteer cookies file: {err}");
+                        None
+                    }
+                }
+            } else {
+                warn!("Puppeteer completed but cookies.txt was not created");
+                None
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let error_text = if stderr.is_empty() {
+                format!("exit {}", output.status)
+            } else {
+                stderr
+            };
+            warn!("Puppeteer cookie scraping failed for {page_url}: {error_text}");
+            None
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            info!("Node.js is not available for puppeteer cookie scraping");
+            None
+        }
+        Err(err) => {
+            warn!("Failed to start puppeteer cookie scraping: {err}");
+            None
+        }
+    }
+}
+
 fn cookie_scoop_argument_attempts(page_url: &str) -> Vec<Vec<String>> {
     let mut base = vec!["--url".to_string(), page_url.to_string()];
     if let Some(browsers) = cookie_scoop_browsers() {
@@ -1627,12 +1748,20 @@ async fn has_probable_youtube_auth_cookie(cookie_file: &Path) -> bool {
         return false;
     };
 
+    has_probable_youtube_auth_cookie_content(&content)
+}
+
+fn has_probable_youtube_auth_cookie_content(content: &str) -> bool {
     let keys = ["\tSID\t", "\tHSID\t", "\tSSID\t", "\tSAPISID\t", "\tLOGIN_INFO\t"];
     keys.iter().any(|needle| content.contains(needle))
 }
 
 fn is_cookie_scoop_enabled() -> bool {
     env_truthy("RUSTUBE_COOKIE_SCOOP_ENABLED", false)
+}
+
+fn is_puppeteer_enabled() -> bool {
+    env_truthy("RUSTUBE_PUPPETEER_ENABLED", true) // Default to true for headless scraping
 }
 
 fn has_explicit_cookies_file() -> bool {
