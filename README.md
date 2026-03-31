@@ -70,11 +70,19 @@ Optional cookie support for blocked/login-required sites:
 For sites requiring authentication, Rustube automatically uses Puppeteer to scrape cookies in headless mode:
 
 - By default, Puppeteer is enabled (`RUSTUBE_PUPPETEER_ENABLED=true`)
-- When downloading from sites that need cookies, Rustube automatically launches a headless browser
+- **Rustube first checks if `cookies.txt` exists and contains valid YouTube authentication cookies**
+- If valid cookies exist, they are used directly (no browser scraping needed)
+- If no valid cookies exist, Rustube automatically launches a headless browser
 - The browser navigates to the target URL and waits for cookies to be set
-- Cookies are saved in Netscape format and passed to yt-dlp
+- Cookies are saved in Netscape format to `cookies.txt` and passed to yt-dlp
 - Set `RUSTUBE_PUPPETEER_ENABLED=false` to disable this feature
-- Configure timeout with `RUSTUBE_PUPPETEER_TIMEOUT_SECS` (default: 30 seconds)
+- Configure timeout with `RUSTUBE_PUPPETEER_TIMEOUT_SECS` (default: 60 seconds)
+
+The automatic process:
+1. Check if `cookies.txt` exists and has valid YouTube auth cookies (SID, HSID, SSID, SAPISID, LOGIN_INFO)
+2. If valid cookies exist → use them
+3. If no/invalid cookies → run headless Puppeteer to get fresh cookies
+4. Save new cookies to `cookies.txt` for future use
 
 Manual cookie scraping (legacy):
 

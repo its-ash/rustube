@@ -1522,7 +1522,13 @@ async fn maybe_extract_cookie_scoop_cookies(page_url: &str) -> Option<PathBuf> {
         return Some(path);
     }
 
-    // Try Puppeteer first for headless cookie scraping
+    // Check if we already have valid cookies, skip Puppeteer if we do
+    if has_valid_cookies_file().await {
+        info!("Valid cookies file already exists, skipping Puppeteer scraping for {page_url}");
+        return None;
+    }
+
+    // Try Puppeteer for headless cookie scraping only if no valid cookies exist
     if let Some(path) = maybe_extract_puppeteer_cookies(page_url).await {
         return Some(path);
     }
@@ -1650,7 +1656,7 @@ async fn maybe_extract_puppeteer_cookies(page_url: &str) -> Option<PathBuf> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(30);
+        .unwrap_or(60); // Increased default timeout from 30 to 60 seconds
 
     let mut command = Command::new("node");
     command
@@ -1770,6 +1776,19 @@ fn has_explicit_cookies_file() -> bool {
         .map(|value| value.trim().to_string())
         .map(|value| !value.is_empty())
         .unwrap_or(false)
+}
+
+async fn has_valid_cookies_file() -> bool {
+    let cookies_file = std::env::var("RUSTUBE_COOKIES_FILE")
+        .unwrap_or_else(|_| "./cookies.txt".to_string());
+    let path_buf = PathBuf::from(&cookies_file);
+    
+    match tokio::fs::read_to_string(&path_buf).await {
+        Ok(content) => {
+            !content.trim().is_empty() && has_probable_youtube_auth_cookie_content(&content)
+        }
+        Err(_) => false,
+    }
 }
 
 fn looks_like_cookie_file(content: &str) -> bool {

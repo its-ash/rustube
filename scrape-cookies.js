@@ -9,17 +9,44 @@ async function scrapeCookies(url) {
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
                         '--disable-dev-shm-usage',
-                        '--disable-gpu'
+                        '--disable-gpu',
+                        '--disable-web-security',
+                        '--disable-features=VizDisplayCompositor'
                 ] }); // Run in headless mode
   const page = await browser.newPage();
 
   try {
-    console.log(`Navigating to ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Set longer timeouts
+    page.setDefaultTimeout(60000); // 60 seconds
+    page.setDefaultNavigationTimeout(60000);
 
-    // Wait for page to load and set cookies
+    console.log(`Navigating to ${url}`);
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+
+    // Wait for page to load and set cookies - longer wait for YouTube
     console.log('Waiting for page to load and set cookies...');
-    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds for cookies to be set
+    await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds for cookies to be set
+
+    // For YouTube specifically, try to trigger cookie setting
+    if (url.includes('youtube.com') || url.includes('youtu.be')) {
+      console.log('Detected YouTube URL, performing additional interactions...');
+      
+      // Try to scroll a bit to trigger lazy loading
+      await page.evaluate(() => {
+        window.scrollTo(0, 500);
+      });
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Try to click on video area if present
+      try {
+        await page.waitForSelector('video, .html5-video-container', { timeout: 5000 });
+        await page.click('video, .html5-video-container');
+        console.log('Clicked on video element');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch (e) {
+        console.log('Video element not found or clickable, continuing...');
+      }
+    }
 
     // Perform some basic interactions to trigger cookie setting
     try {
@@ -44,6 +71,8 @@ async function scrapeCookies(url) {
       return;
     }
 
+    console.log(`Found ${cookies.length} cookies`);
+
     // Convert to Netscape format
     const netscapeCookies = cookiesToNetscape(cookies, url);
 
@@ -55,6 +84,7 @@ async function scrapeCookies(url) {
 
   } catch (error) {
     console.error(`Error scraping cookies: ${error.message}`);
+    throw error; // Re-throw to be caught by caller
   } finally {
     await browser.close();
   }
