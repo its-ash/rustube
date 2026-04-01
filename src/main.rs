@@ -108,27 +108,31 @@ async fn log_cookie_auth_health() {
         match tokio::fs::read_to_string(&path_buf).await {
             Ok(content) => {
                 if content.trim().is_empty() {
-                    warn!("RUSTUBE_COOKIES_FILE is set to {path} but file is empty.");
+                    info!("RUSTUBE_COOKIES_FILE is set to {path} but file is empty. Puppeteer will generate cookies on first download.");
                 } else {
                     let has_auth = has_probable_youtube_auth_cookie_content(&content);
                     if has_auth {
                         info!("RUSTUBE_COOKIES_FILE loaded with probable YouTube auth cookies.");
                     } else {
-                        warn!(
-                            "RUSTUBE_COOKIES_FILE loaded but missing probable YouTube auth cookie keys (SID/HSID/SSID/SAPISID/LOGIN_INFO)."
+                        info!(
+                            "RUSTUBE_COOKIES_FILE loaded but missing probable YouTube auth cookie keys. Puppeteer will generate fresh cookies on first download."
                         );
                     }
                 }
             }
             Err(err) => {
-                warn!("RUSTUBE_COOKIES_FILE is set to {path} but could not be read: {err}");
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    info!("RUSTUBE_COOKIES_FILE is set to {path} but file does not exist. Puppeteer will generate cookies on first download.");
+                } else {
+                    warn!("RUSTUBE_COOKIES_FILE is set to {path} but could not be read: {err}");
+                }
             }
         }
     } else if cookies_header.is_some() {
         info!("Using RUSTUBE_COOKIES_HEADER for yt-dlp cookie auth.");
     } else {
-        warn!(
-            "No explicit cookie auth configured (RUSTUBE_COOKIES_FILE / RUSTUBE_COOKIES_HEADER). Some YouTube links may fail bot-check."
+        info!(
+            "No explicit cookie auth configured. Puppeteer will attempt to generate cookies for authenticated downloads."
         );
     }
 }
